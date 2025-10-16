@@ -1,0 +1,600 @@
+#1 Symulacja piłeczki z oporami powietrza, utratą energii i wykresem energii + odbicia poprzez kliknięcie myszy
+
+import pygame
+import sys
+import math
+
+# --- Parametry symulacji (metry) ---
+sim_width = 12.0
+sim_height = 8.0
+ppm = 100  # pixels per meter (skalowanie)
+
+W = int(sim_width * ppm)
+H = int(sim_height * ppm)
+
+# Panel wykresu po prawej
+graph_w = 360
+GRAPH_BG = (20, 20, 30)
+WINDOW_W = W + graph_w
+WINDOW_H = H
+
+gravity = (0.0, -10.0)  # m/s^2
+restitution = 0.95      # współczynnik sprężystości (odbicia)
+drag = 0.3              # współczynnik dla liniowego oporu powietrz
+mass = 1.0              # masa piłki [kg]
+
+click_impulse = 6.0  # m/s prędkość dodawana piłce podczas odbicia
+
+
+ball = {
+    "r": 0.2,  # m
+    "pos": [5.0, 5.0],  # m
+    "vel": [5.0, 5.0],  # m/s
+    "m": mass
+}
+
+
+pygame.init()
+screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+clock = pygame.time.Clock()
+pygame.display.set_caption("Symulacja piłki - pygame + wykres energii i prędkości")
+font = pygame.font.SysFont(None, 18)
+
+def simulate(ball, g, dt, sim_w, sim_h, restitution, drag_coeff):
+    """
+    trapezoid dla liniowego oporu: a = g - c*v    #liniowy opór powietrza
+    Aktualizuje ball["pos"] i ball["vel"].
+    """
+    # kopia starej predkosci (w m/s)
+    v_old_x = ball["vel"][0]
+    v_old_y = ball["vel"][1]
+
+    #obliczamy przyspieszenie uwzględniajac liniowy opór powietrza
+    def accel(vx, vy):
+        return (g[0] - drag_coeff * vx, g[1] - drag_coeff * vy) 
+
+    # 1) przyspieszenie w punkcie
+    a_nx, a_ny = accel(v_old_x, v_old_y)
+
+    # 2) prędkość w następnym kroku
+    v_pred_x = v_old_x + a_nx * dt
+    v_pred_y = v_old_y + a_ny * dt
+
+    # 3) przyspieszenie w następnym kroku
+    a_pred_x, a_pred_y = accel(v_pred_x, v_pred_y)
+
+    # 4) aktualizacja prędkości używając średniego przyspieszenia (trapezoid)
+    v_new_x = v_old_x + 0.5 * (a_nx + a_pred_x) * dt
+    v_new_y = v_old_y + 0.5 * (a_ny + a_pred_y) * dt
+
+    # 5) aktualizacja pozycji używając średniej prędkości (trapezoid)
+    ball["pos"][0] += 0.5 * (v_old_x + v_new_x) * dt
+    ball["pos"][1] += 0.5 * (v_old_y + v_new_y) * dt
+
+    # zapisz nową prędkość
+    ball["vel"][0] = v_new_x
+    ball["vel"][1] = v_new_y
+
+    # 6) kolizje ze ścianami (koryguj pozycję i prędkość)
+    r = ball["r"]
+    if ball["pos"][0] - r < 0:
+        ball["pos"][0] = r
+        ball["vel"][0] = -ball["vel"][0] * restitution
+    if ball["pos"][0] + r > sim_w:
+        ball["pos"][0] = sim_w - r
+        ball["vel"][0] = -ball["vel"][0] * restitution
+    if ball["pos"][1] - r < 0:
+        ball["pos"][1] = r
+        ball["vel"][1] = -ball["vel"][1] * restitution
+    if ball["pos"][1] + r > sim_h:
+        ball["pos"][1] = sim_h - r
+        ball["vel"][1] = -ball["vel"][1] * restitution
+
+def compute_energy(ball, g):
+    """
+    Zwraca (KE, PE, total)
+    PE liczymy względem y=0: PE = m * g_mag * y, gdzie g_mag = -g_y (bo g_y zwykle <0)
+    """
+    m = ball.get("m", 1.0)
+    vx, vy = ball["vel"][0], ball["vel"][1]
+    ke = 0.5 * m * (vx*vx + vy*vy)
+    g_mag = -g[1]
+    if g_mag < 0:
+        g_mag = abs(g_mag)
+    y = ball["pos"][1]
+    if y < 0:
+        y = 0.0
+    pe = m * g_mag * y
+    total = ke + pe
+    return ke, pe, total
+
+# pamięć energii i prędkości do wykresu
+energy_history_ke = []
+energy_history_pe = []
+energy_history_tot = []
+speed_history = []
+time_history = []
+max_samples = 500  # ile punktów wyświetlać na wykres
+
+#Symulacja
+
+running = True
+t = 0.0
+while running:
+    dt = clock.tick(60) / 1000.0  # sekundy
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+        # => DODAJ to, aby móc odbijać piłkę myszką <=
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            mx, my = event.pos  # piksele (x,y) od lewego górnego rogu okna
+            # Konwersja piksele -> metry (uwaga: pygame Y rośnie w dół, w naszej symulacji Y rośnie w górę)
+            sim_x = mx / ppm
+            sim_y = (H - my) / ppm
+
+            # odległość między kliknięciem a środkiem piłki (w metrach)
+            dist = math.hypot(sim_x - ball["pos"][0], sim_y - ball["pos"][1])
+
+            if dist <= ball["r"] + 0.5:
+                # lewy przycisk (1) => odbicie do góry
+                if event.button == 1:
+                    # proste dodanie pionowej prędkości:
+                    ball["vel"][1] += click_impulse
+
+                # prawy przycisk (3) => opcjonalnie "popchnij w dół"
+                elif event.button == 3:
+                    ball["vel"][1] -= click_impulse
+
+    simulate(ball, gravity, dt, sim_width, sim_height, restitution, drag)
+    t += dt
+
+    # oblicz energie i prędkość i zapamietaj
+    ke, pe, tot = compute_energy(ball, gravity)
+    vx, vy = ball["vel"][0], ball["vel"][1]
+    speed = math.hypot(vx, vy)
+
+    energy_history_ke.append(ke)
+    energy_history_pe.append(pe)
+    energy_history_tot.append(tot)
+    speed_history.append(speed)
+    time_history.append(t)
+
+    # przytnij historie do max_samples
+    if len(time_history) > max_samples:
+        del energy_history_ke[0]
+        del energy_history_pe[0]
+        del energy_history_tot[0]
+        del speed_history[0]
+        del time_history[0]
+
+    # ---- rysowanie ----
+    screen.fill((30, 30, 30))
+
+    # 1) obszar symulacji (lewa część)
+    sim_surface = pygame.Surface((W, H))
+    sim_surface.fill((30, 30, 30))
+
+    # rysowanie piłki (konwersja metr->piksel, odwrócenie Y dla pygame)
+    px = int(ball["pos"][0] * ppm)
+    py = H - int(ball["pos"][1] * ppm)  # pygame y = 0 u góry
+    pr = int(ball["r"] * ppm)
+    pygame.draw.circle(sim_surface, (220, 50, 50), (px, py), pr)
+
+    # opcjonalne: narysuj ziemię (y=0)
+    ground_y_px = H - int(0 * ppm)
+    pygame.draw.line(sim_surface, (100, 100, 100), (0, ground_y_px), (W, ground_y_px), 2)
+
+    screen.blit(sim_surface, (0, 0))
+
+    # 2) obszar wykresu (prawa część) - podzielony na panel energii (góra) i panel prędkości (dół)
+    graph_x = W
+    graph_y = 0
+    graph_h = H
+
+    # parametry podziału
+    energy_h = int(graph_h * 0.7)
+    speed_h = graph_h - energy_h
+    energy_area = (graph_x, graph_y, graph_w, energy_h)
+    speed_area = (graph_x, graph_y + energy_h, graph_w, speed_h)
+
+    # tło wykresu
+    pygame.draw.rect(screen, GRAPH_BG, (graph_x, graph_y, graph_w, graph_h))
+
+    # ---- PANEL ENERGII ----
+    ex, ey, ew, eh = energy_area
+
+    # oblicz zakres y dla wykresu energii
+    all_vals = energy_history_ke + energy_history_pe + energy_history_tot
+    if len(all_vals) == 0:
+        min_e = 0.0
+        max_e = 1.0
+    else:
+        min_e = min(all_vals)
+        max_e = max(all_vals)
+        padding = 0.1 * max(1.0, (max_e - min_e))
+        min_e = max(0.0, min_e - padding)
+        max_e = max_e + padding
+
+    # rysuj osie i siatkę y (energia)
+    n_grid = 5
+    for i in range(n_grid + 1):
+        yy = ey + int(i * (eh / n_grid))
+        pygame.draw.line(screen, (50, 50, 60), (ex + 30, yy), (ex + ew - 10, yy), 1)
+        frac = 1.0 - (yy - ey) / eh
+        val = min_e + frac * (max_e - min_e) if max_e > min_e else min_e
+        label = font.render(f"{val:.1f}", True, (200, 200, 200))
+        screen.blit(label, (ex + 4, yy - 8))
+
+    # rysuj krzywe KE (niebieski), PE (zielony), TOT (żółty)
+    def map_point_energy(idx, val):
+        n = len(time_history)
+        if n <= 1:
+            x = ex + 30
+        else:
+            x = ex + 30 + int((idx / (max_samples - 1)) * (ew - 40))
+        if max_e > min_e:
+            frac = (val - min_e) / (max_e - min_e)
+        else:
+            frac = 0.0
+        y = ey + int((1.0 - frac) * eh)
+        return (x, y)
+
+    if len(time_history) >= 1:
+        pts_ke = [map_point_energy(i, energy_history_ke[i]) for i in range(len(energy_history_ke))]
+        pts_pe = [map_point_energy(i, energy_history_pe[i]) for i in range(len(energy_history_pe))]
+        pts_tot = [map_point_energy(i, energy_history_tot[i]) for i in range(len(energy_history_tot))]
+
+        if len(pts_ke) >= 2:
+            pygame.draw.lines(screen, (100, 150, 255), False, pts_ke, 2)
+        if len(pts_pe) >= 2:
+            pygame.draw.lines(screen, (120, 255, 140), False, pts_pe, 2)
+        if len(pts_tot) >= 2:
+            pygame.draw.lines(screen, (255, 230, 80), False, pts_tot, 2)
+
+    # legenda i wartości aktualne (energia)
+    label_ke = font.render(f"KE: {ke:.3f} J", True, (100, 150, 255))
+    label_pe = font.render(f"PE: {pe:.3f} J", True, (120, 255, 140))
+    label_tot = font.render(f"TOTAL: {tot:.3f} J", True, (255, 230, 80))
+    screen.blit(label_ke, (ex + 36, ey + 8))
+    screen.blit(label_pe, (ex + 36, ey + 28))
+    screen.blit(label_tot, (ex + 36, ey + 48))
+
+    # ---- PANEL PRĘDKOŚCI ----
+    sx, sy, sw, sh = speed_area
+
+    # zakres y dla prędkości
+    if len(speed_history) == 0:
+        min_s = 0.0
+        max_s = 1.0
+    else:
+        min_s = min(speed_history)
+        max_s = max(speed_history)
+        padding_s = 0.1 * max(1.0, (max_s - min_s))
+        min_s = max(0.0, min_s - padding_s)
+        max_s = max_s + padding_s
+
+    # siatka i etykiety prędkości
+    n_grid_s = 4
+    for i in range(n_grid_s + 1):
+        yy = sy + int(i * (sh / n_grid_s))
+        pygame.draw.line(screen, (40, 40, 50), (sx + 10, yy), (sx + sw - 10, yy), 1)
+        frac = 1.0 - (yy - sy) / sh
+        val = min_s + frac * (max_s - min_s) if max_s > min_s else min_s
+        label = font.render(f"{val:.2f}", True, (200, 200, 200))
+        screen.blit(label, (sx + 2, yy - 8))
+
+    # mapowanie punktów prędkości
+    def map_point_speed(idx, val):
+        n = len(time_history)
+        if n <= 1:
+            x = sx + 10
+        else:
+            x = sx + 10 + int((idx / (max_samples - 1)) * (sw - 20))
+        if max_s > min_s:
+            frac = (val - min_s) / (max_s - min_s)
+        else:
+            frac = 0.0
+        y = sy + int((1.0 - frac) * sh)
+        return (x, y)
+
+    if len(time_history) >= 1:
+        pts_s = [map_point_speed(i, speed_history[i]) for i in range(len(speed_history))]
+        if len(pts_s) >= 2:
+            pygame.draw.lines(screen, (200, 120, 255), False, pts_s, 2)
+
+    # etykieta prędkości aktualnej
+    label_speed = font.render(f"SPEED: {speed:.3f} m/s", True, (200, 120, 255))
+    screen.blit(label_speed, (sx + 12, sy + 6))
+
+    # etykieta czasu i dt
+    label_time = font.render(f"t = {t:.2f} s  dt={dt:.4f}", True, (220, 220, 220))
+    screen.blit(label_time, (graph_x + 36, graph_h - 28))
+
+    pygame.display.flip()
+
+pygame.quit()
+sys.exit()
+
+
+
+
+#2. Symulcja wielu piłeczek + obliczanie energii całego układu 
+#dodajemy dodatkowe piłki o losowej wielkości masie i prędkości początkowej poprzez kliknięcia korzystając z pygame
+
+import random
+
+# --- Parametry symulacji (metry) ---
+sim_width = 12.0
+sim_height = 8.0
+ppm = 100  # pixels per meter (skalowanie)
+
+W = int(sim_width * ppm)
+H = int(sim_height * ppm)
+
+# Panel wykresu po prawej
+graph_w = 360
+GRAPH_BG = (20, 20, 30)
+WINDOW_W = W + graph_w
+WINDOW_H = H
+
+gravity = (0.0, -10.0)  # m/s^2 
+restitution = 0.99      # współczynnik sprężystości (odbicia)
+drag = 0.2              # opór powietrza liniowy
+default_mass = 1.0      # masa domyślna [kg]
+
+pygame.init()
+screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+clock = pygame.time.Clock()
+pygame.display.set_caption("Symulacja wielu piłek + wykres energii układu")
+font = pygame.font.SysFont(None, 18)
+
+#funkcje simulate / compute_energy  jak wcześniej
+
+def simulate(ball, g, dt, sim_w, sim_h, restitution, drag_coeff):
+    """
+    Heun / trapezoid dla liniowego oporu: a = g - c*v
+    Aktualizuje ball["pos"] i ball["vel"].
+    """
+    v_old_x = ball["vel"][0]
+    v_old_y = ball["vel"][1]
+
+    def accel(vx, vy):
+        return (g[0] - drag_coeff * vx, g[1] - drag_coeff * vy)
+
+    a_nx, a_ny = accel(v_old_x, v_old_y)
+
+    v_pred_x = v_old_x + a_nx * dt
+    v_pred_y = v_old_y + a_ny * dt
+
+    a_pred_x, a_pred_y = accel(v_pred_x, v_pred_y)
+
+    v_new_x = v_old_x + 0.5 * (a_nx + a_pred_x) * dt
+    v_new_y = v_old_y + 0.5 * (a_ny + a_pred_y) * dt
+
+    ball["pos"][0] += 0.5 * (v_old_x + v_new_x) * dt
+    ball["pos"][1] += 0.5 * (v_old_y + v_new_y) * dt
+
+    ball["vel"][0] = v_new_x
+    ball["vel"][1] = v_new_y
+
+    # kolizje ze ścianami
+    r = ball["r"]
+    if ball["pos"][0] - r < 0:
+        ball["pos"][0] = r
+        ball["vel"][0] = -ball["vel"][0] * restitution
+    if ball["pos"][0] + r > sim_w:
+        ball["pos"][0] = sim_w - r
+        ball["vel"][0] = -ball["vel"][0] * restitution
+    if ball["pos"][1] - r < 0:
+        ball["pos"][1] = r
+        ball["vel"][1] = -ball["vel"][1] * restitution
+    if ball["pos"][1] + r > sim_h:
+        ball["pos"][1] = sim_h - r
+        ball["vel"][1] = -ball["vel"][1] * restitution
+
+def compute_energy(ball, g):
+    """
+    Zwraca (KE, PE, total) dla pojedynczej piłki.
+    PE liczymy względem y=0: PE = m * g_mag * y, g_mag = -g_y
+    """
+    m = ball.get("m", default_mass)
+    vx, vy = ball["vel"][0], ball["vel"][1]
+    ke = 0.5 * m * (vx*vx + vy*vy)
+    g_mag = -g[1]
+    if g_mag < 0:
+        g_mag = abs(g_mag)
+    y = ball["pos"][1]
+    if y < 0:
+        y = 0.0
+    pe = m * g_mag * y
+    total = ke + pe
+    return ke, pe, total
+
+# --- lista piłek (kilka przykładowych) ---
+balls = []
+def spawn_ball(pos_m, vel_m=(0.0,0.0), radius=0.2, mass=1.0, color=None):
+    b = {
+        "r": radius,
+        "pos": [pos_m[0], pos_m[1]],
+        "vel": [vel_m[0], vel_m[1]],
+        "m": mass,
+        "color": color if color is not None else (random.randint(50,255), random.randint(50,255), random.randint(50,255))
+    }
+    balls.append(b)
+
+# Dodajemy kilka startowych piłek
+for i in range(5):
+    r = random.uniform(0.12, 0.28)
+    px = random.uniform(r, sim_width - r)
+    py = random.uniform(r + 1.0, sim_height - r)  # trochę nad ziemią
+    vx = random.uniform(-6.0, 6.0)
+    vy = random.uniform(-2.0, 8.0)
+    m = max(0.2, r * r * 2.0)  # prosta zależność masy od rozmiaru (nieistotne)
+    spawn_ball((px, py), (vx, vy), radius=r, mass=m)
+
+# pamięć energii całego układu do wykresu
+energy_history_ke = []
+energy_history_pe = []
+energy_history_tot = []
+time_history = []
+max_samples = 500  # ile punktów wyświetlać na wykres
+
+running = True
+t = 0.0
+while running:
+    dt = clock.tick(60) / 1000.0  # sekundy
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            # lewy przycisk — dodaj nową piłkę w miejscu kursora z losową prędkością
+            mx, my = pygame.mouse.get_pos()
+            # jeśli kliknięto w panel wykresu, ignoruj
+            if mx < W:
+                sim_x = mx / ppm
+                sim_y = (H - my) / ppm
+                rvx = random.uniform(-6.0, 6.0)
+                rvy = random.uniform(-6.0, 6.0)
+                rr = random.uniform(0.12, 0.28)
+                rm = max(0.2, rr*rr*2.0)
+                spawn_ball((sim_x, sim_y), (rvx, rvy), radius=rr, mass=rm)
+
+    # symulacja każdej piłki
+    for b in balls:
+        simulate(b, gravity, dt, sim_width, sim_height, restitution, drag)
+
+    t += dt
+
+    # oblicz energie całego układu (sumujemy po piłkach)
+    ke_sum = 0.0
+    pe_sum = 0.0
+    tot_sum = 0.0
+    # opcjonalnie możemy policzyć prędkości (np. max) — tutaj nie rysujemy prędkości układu
+    for b in balls:
+        ke_b, pe_b, tot_b = compute_energy(b, gravity)
+        ke_sum += ke_b
+        pe_sum += pe_b
+        tot_sum += tot_b
+
+    energy_history_ke.append(ke_sum)
+    energy_history_pe.append(pe_sum)
+    energy_history_tot.append(tot_sum)
+    time_history.append(t)
+
+    # przytnij historie
+    if len(time_history) > max_samples:
+        del energy_history_ke[0]
+        del energy_history_pe[0]
+        del energy_history_tot[0]
+        del time_history[0]
+
+    # ---- rysowanie ----
+    screen.fill((30, 30, 30))
+
+    # 1) obszar symulacji (lewa część)
+    sim_surface = pygame.Surface((W, H))
+    sim_surface.fill((30, 30, 30))
+
+    # rysuj piłki
+    for b in balls:
+        px = int(b["pos"][0] * ppm)
+        py = H - int(b["pos"][1] * ppm)  # pygame y = 0 u góry
+        pr = max(1, int(b["r"] * ppm))
+        pygame.draw.circle(sim_surface, b["color"], (px, py), pr)
+        # opcjonalnie narysuj mały punkt środka
+        pygame.draw.circle(sim_surface, (20,20,20), (px, py), max(1, pr//6))
+
+    # narysuj ziemię (y=0)
+    ground_y_px = H - int(0 * ppm)
+    pygame.draw.line(sim_surface, (100, 100, 100), (0, ground_y_px), (W, ground_y_px), 2)
+
+    screen.blit(sim_surface, (0, 0))
+
+    # 2) obszar wykresu (prawa część)
+    graph_x = W
+    graph_y = 0
+    graph_h = H
+
+    energy_h = int(graph_h * 0.7)
+    speed_h = graph_h - energy_h
+    energy_area = (graph_x, graph_y, graph_w, energy_h)
+    speed_area = (graph_x, graph_y + energy_h, graph_w, speed_h)
+
+    pygame.draw.rect(screen, GRAPH_BG, (graph_x, graph_y, graph_w, graph_h))
+
+    # ---- PANEL ENERGII (całego układu) ----
+    ex, ey, ew, eh = energy_area
+
+    # oblicz zakres y dla wykresu energii na podstawie historii
+    all_vals = energy_history_ke + energy_history_pe + energy_history_tot
+    if len(all_vals) == 0:
+        min_e = 0.0
+        max_e = 1.0
+    else:
+        min_e = min(all_vals)
+        max_e = max(all_vals)
+        padding = 0.1 * max(1.0, (max_e - min_e))
+        min_e = max(0.0, min_e - padding)
+        max_e = max_e + padding
+
+    # rysuj osie i siatkę y (energia)
+    n_grid = 5
+    for i in range(n_grid + 1):
+        yy = ey + int(i * (eh / n_grid))
+        pygame.draw.line(screen, (50, 50, 60), (ex + 30, yy), (ex + ew - 10, yy), 1)
+        frac = 1.0 - (yy - ey) / eh
+        val = min_e + frac * (max_e - min_e) if max_e > min_e else min_e
+        label = font.render(f"{val:.1f}", True, (200, 200, 200))
+        screen.blit(label, (ex + 4, yy - 8))
+
+    # rysuj krzywe KE_total (niebieski), PE_total (zielony), TOT (żółty)
+    def map_point_energy(idx, val):
+        n = len(time_history)
+        if n <= 1:
+            x = ex + 30
+        else:
+            x = ex + 30 + int((idx / (max_samples - 1)) * (ew - 40))
+        if max_e > min_e:
+            frac = (val - min_e) / (max_e - min_e)
+        else:
+            frac = 0.0
+        y = ey + int((1.0 - frac) * eh)
+        return (x, y)
+
+    if len(time_history) >= 1:
+        pts_ke = [map_point_energy(i, energy_history_ke[i]) for i in range(len(energy_history_ke))]
+        pts_pe = [map_point_energy(i, energy_history_pe[i]) for i in range(len(energy_history_pe))]
+        pts_tot = [map_point_energy(i, energy_history_tot[i]) for i in range(len(energy_history_tot))]
+
+        if len(pts_ke) >= 2:
+            pygame.draw.lines(screen, (100, 150, 255), False, pts_ke, 2)
+        if len(pts_pe) >= 2:
+            pygame.draw.lines(screen, (120, 255, 140), False, pts_pe, 2)
+        if len(pts_tot) >= 2:
+            pygame.draw.lines(screen, (255, 230, 80), False, pts_tot, 2)
+
+    # legenda i wartości aktualne (energia układu)
+    label_ke = font.render(f"KE_total: {ke_sum:.3f} J", True, (100, 150, 255))
+    label_pe = font.render(f"PE_total: {pe_sum:.3f} J", True, (120, 255, 140))
+    label_tot = font.render(f"TOTAL: {tot_sum:.3f} J", True, (255, 230, 80))
+    screen.blit(label_ke, (ex + 36, ey + 8))
+    screen.blit(label_pe, (ex + 36, ey + 28))
+    screen.blit(label_tot, (ex + 36, ey + 48))
+
+    # ---- DOLNY PANEL: informacje / prosty wykres liczby piłek (opcjonalnie) ----
+    sx, sy, sw, sh = speed_area
+    # rysujemy tło panelu
+    pygame.draw.rect(screen, (18,18,24), (sx, sy, sw, sh))
+    # tekst: liczba piłek
+    label_count = font.render(f"Piłek: {len(balls)}    t = {t:.2f} s    dt={dt:.4f}", True, (200,200,200))
+    screen.blit(label_count, (sx + 8, sy + 6))
+
+    # informacja o obsłudze myszy
+    hint = font.render("LPM: dodaj piłkę   (brak kolizji piłka-piłka)", True, (160,160,160))
+    screen.blit(hint, (sx + 8, sy + 26))
+
+    pygame.display.flip()
+
+pygame.quit()
+sys.exit()
