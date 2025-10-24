@@ -1,0 +1,273 @@
+"""
+bead_collisions_pygame.py
+
+Wersja Pygame symulacji wielu kulek na okręgu z prostymi kolizjami.
+Jeśli dystans między dwiema kulkami <= sumie ich promieni,
+to obie kulki odwracają swoje prędkości (vel *= -1).
+
+Sterowanie:
+  Space  - start / pause
+  S      - pojedynczy krok (step)
+  R      - reset
+  A      - dodaj nową piłkę (losowy kąt)
+  Q/Esc - wyjście
+  ↑/↓    - zmniejsz/powiększ num_steps (dokładność)
+"""
+
+import math
+import random
+import pygame
+import sys
+
+# ---------------- Vector2 ----------------
+class Vector2:
+    def __init__(self, x=0.0, y=0.0):
+        self.x = float(x); self.y = float(y)
+    def clone(self): return Vector2(self.x, self.y)
+    def set(self, v): self.x = v.x; self.y = v.y
+    def add(self, v, s=1.0): self.x += v.x * s; self.y += v.y * s; return self
+    def subtract(self, v, s=1.0): self.x -= v.x * s; self.y -= v.y * s; return self
+    def add_vectors(self, a, b): self.x = a.x + b.x; self.y = a.y + b.y; return self
+    def subtract_vectors(self, a, b): self.x = a.x - b.x; self.y = a.y - b.y; return self
+    def length(self): return math.hypot(self.x, self.y)
+    def scale(self, s): self.x *= s; self.y *= s; return self
+    def dot(self, v): return self.x * v.x + self.y * v.y
+    def perp(self): return Vector2(-self.y, self.x)
+    def to_tuple(self): return (self.x, self.y)
+
+# ---------------- Bead (numeryczny) ----------------
+class Bead:
+    def __init__(self, radius, mass, pos: Vector2):
+        self.radius = radius
+        self.mass = mass
+        self.pos = pos.clone()
+        self.prev_pos = pos.clone()
+        self.vel = Vector2(0.0, 0.0)
+    def start_step(self, dt, gravity: Vector2):
+        # explicit Euler: v += g * dt; pos += v * dt
+        self.vel.add(gravity, dt)
+        self.prev_pos.set(self.pos)
+        self.pos.add(self.vel, dt)
+    def keep_on_wire(self, center: Vector2, radius: float):
+        # korekta pozycji tak, by leżała na okręgu
+        dirv = Vector2(self.pos.x - center.x, self.pos.y - center.y)
+        length = dirv.length()
+        if length == 0.0:
+            return 0.0
+        dirv.scale(1.0 / length)
+        lambda_corr = radius - length
+        # przesuwamy pozycję radialnie
+        self.pos.add(dirv, lambda_corr)
+        return lambda_corr
+    def end_step(self, dt):
+        # prędkość zróżnicowana numerycznie
+        self.vel = Vector2((self.pos.x - self.prev_pos.x) / dt,
+                           (self.pos.y - self.prev_pos.y) / dt)
+
+# ---------------- Analytic bead (opcjonalnie) ----------------
+class AnalyticBead:
+    def __init__(self, radius, bead_radius, mass, angle):
+        self.radius = radius
+        self.bead_radius = bead_radius
+        self.mass = mass
+        self.angle = angle
+        self.omega = 0.0
+    def simulate(self, dt, gravity_magnitude):
+        acc = -gravity_magnitude / self.radius * math.sin(self.angle)
+        self.omega += acc * dt
+        self.angle += self.omega * dt
+        centrifugal_force = (self.omega ** 2) * self.radius
+        force = centrifugal_force + math.cos(self.angle) * gravity_magnitude
+        return force
+    def get_pos(self):
+        return Vector2(math.sin(self.angle) * self.radius,
+                       -math.cos(self.angle) * self.radius)
+
+# ---------------- Parametry i konwersje współrzędnych ----------------
+WIDTH, HEIGHT = 1000, 700
+SIM_MIN_WIDTH = 2.0
+cScale = min(WIDTH, HEIGHT) / SIM_MIN_WIDTH
+
+def cX(pos):
+    return int(pos.x * cScale)
+def cY(pos):
+    return int(HEIGHT - pos.y * cScale)
+
+# fizyka
+gravity = Vector2(0.0, -10.0)
+dt = 1.0 / 60.0
+num_steps = 300
+# okrąg (wire)
+wire_center = Vector2(SIM_MIN_WIDTH/2.0, SIM_MIN_WIDTH/2.0)
+wire_radius = SIM_MIN_WIDTH * 0.4
+
+# ---------------- Zarządzanie wieloma piłkami ----------------
+beads = []
+
+def add_bead_at_angle(angle, radius=0.06, mass=1.0):
+    # pozycja na obwodzie
+    pos = Vector2(wire_center.x + math.sin(angle) * wire_radius,
+                  wire_center.y - math.cos(angle) * wire_radius)
+    b = Bead(radius=radius, mass=mass, pos=pos)
+    # opcjonalnie dodajemy małą prędkość styczną zależną od kąta
+    tangential = Vector2(math.cos(angle), math.sin(angle))  # wektor styczny przybliżony
+    b.vel.add(tangential, 0.0)  # domyślnie start = 0; jeśli chcesz inicjalną prędkość, użyj druga wartość
+    beads.append(b)
+    return b
+
+def random_beads(n):
+    beads.clear()
+    # rozmieść równomiernie na okręgu + drobny losowy przesyt by nie nachodziły
+    base = 2*math.pi / n
+    for i in range(n):
+        angle = i * base + (random.random() - 0.5) * 0.2
+        add_bead_at_angle(angle)
+
+# inicjalnie kilka piłek
+random_beads(2)
+
+# analityczny (dla porównania, tylko jeden)
+analytic = AnalyticBead(radius=wire_radius, bead_radius=0.06, mass=1.0, angle=0.5 * math.pi)
+
+last_force = 0.0
+last_analytic_force = 0.0
+paused = True
+
+# ---------------- Symulacja i kolizje ----------------
+def handle_collisions(dt_local):
+    """
+    Prosty mechanizm kolizji: jeśli dist <= r1 + r2,
+    to odwróć prędkości obu kulek vel *= -1 oraz zaktualizuj prev_pos,
+    żeby integrator nie "przywrócił" poprzedniej prędkości natychmiast.
+    """
+    n = len(beads)
+    for i in range(n):
+        bi = beads[i]
+        for j in range(i+1, n):
+            bj = beads[j]
+            # odległość między środkami
+            dx = bi.pos.x - bj.pos.x
+            dy = bi.pos.y - bj.pos.y
+            dist = math.hypot(dx, dy)
+            rsum = bi.radius + bj.radius
+            if dist <= rsum and dist > 1e-9:
+                # kolizja - mnożymy prędkości przez -1
+                bi.vel.scale(-1.0)
+                bj.vel.scale(-1.0)
+                # aktualizujemy prev_pos, żeby nast. krok był spójny: prev = pos - vel*dt
+                bi.prev_pos = Vector2(bi.pos.x - bi.vel.x * dt_local, bi.pos.y - bi.vel.y * dt_local)
+                bj.prev_pos = Vector2(bj.pos.x - bj.vel.x * dt_local, bj.pos.y - bj.vel.y * dt_local)
+                # (opcjonalnie) niewielkie rozdzielenie pozycji, żeby nie ciągle wykrywać tej samej kolizji
+                # przesuwamy na zewnątrz wzdłuż wektora łączącego o połowę przenikania
+                overlap = rsum - dist
+                if overlap > 0.0:
+                    nx = dx / dist
+                    ny = dy / dist
+                    shift = overlap * 0.51  # minimalne odseparowanie
+                    bi.pos.add(Vector2(nx, ny), shift * 0.5)
+                    bj.pos.add(Vector2(-nx, -ny), shift * 0.5)
+                    # po przesunięciu jeszcze rzutujemy na okrąg (constraint)
+                    bi.keep_on_wire(wire_center, wire_radius)
+                    bj.keep_on_wire(wire_center, wire_radius)
+
+def simulate_frame():
+    global last_force, last_analytic_force
+    sdt = dt / num_steps
+    force = 0.0
+    aforce = 0.0
+
+    for _ in range(num_steps):
+        # update każdej kulki: start -> projection -> end
+        for b in beads:
+            b.start_step(sdt, gravity)
+            lam = b.keep_on_wire(wire_center, wire_radius)
+            # numeryczna miara siły dla tej kulki (nadpisywana - pokazuje ostatnią)
+            force = abs(lam / (sdt * sdt))
+            b.end_step(sdt)
+
+        # po aktualizacji wszystkich pozycji obsłuż kolizje (używamy sdt jako dt_local)
+        handle_collisions(sdt)
+
+        # analityczna kulka (dla porównania)
+        aforce = analytic.simulate(sdt, abs(gravity.y))
+
+    last_force = force
+    last_analytic_force = aforce
+
+# ---------------- Pygame init i rysowanie ----------------
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Wiele piłek na okręgu — kolizje (vel *= -1)")
+font = pygame.font.SysFont(None, 22)
+clock = pygame.time.Clock()
+
+def draw():
+    screen.fill((30, 30, 30))
+    # rysuj okrąg
+    cx = cX(wire_center); cy = cY(wire_center)
+    radius_px = int(wire_radius * cScale)
+    pygame.draw.circle(screen, (200, 120, 20), (cx, cy), radius_px, width=3)
+
+    # rysuj wszystkie piłki
+    for b in beads:
+        bx = cX(b.pos); by = cY(b.pos)
+        pygame.draw.circle(screen, (200, 40, 40), (bx, by), max(2, int(b.radius * cScale)))
+
+    # rysuj analityczną (zielona)
+    a_pos = analytic.get_pos()
+    a_pos.add(wire_center)
+    ax = cX(a_pos); ay = cY(a_pos)
+    pygame.draw.circle(screen, (40, 200, 80), (ax, ay), max(2, int(analytic.bead_radius * cScale)))
+
+    # tekst info
+    paused_text = "PAUSED" if paused else "RUNNING"
+    info_lines = [
+        f"{paused_text}  (Space - toggle, S - step, R - reset, A - add bead, Q/Esc - quit)",
+        f"beads = {len(beads)}",
+        f"force (last numeric) = {last_force:.3f}",
+        f"force (analytic) = {last_analytic_force:.3f}",
+        f"num_steps per frame = {num_steps}"
+    ]
+    y = 8
+    for line in info_lines:
+        surf = font.render(line, True, (230, 230, 230))
+        screen.blit(surf, (8, y))
+        y += 20
+
+    pygame.display.flip()
+
+# ---------------- Główna pętla ----------------
+running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                running = False
+            elif event.key == pygame.K_SPACE:
+                paused = not paused
+            elif event.key == pygame.K_s:
+                if paused:
+                    simulate_frame()
+            elif event.key == pygame.K_r:
+                random_beads(5)
+                analytic = AnalyticBead(radius=wire_radius, bead_radius=0.06, mass=1.0, angle=0.5 * math.pi)
+                last_force = last_analytic_force = 0.0
+            elif event.key == pygame.K_a:
+                # dodaj nową piłkę w losowym kącie
+                angle = random.random() * 2*math.pi
+                add_bead_at_angle(angle)
+            elif event.key == pygame.K_UP:
+                num_steps = min(2000, int(num_steps * 1.5))
+            elif event.key == pygame.K_DOWN:
+                num_steps = max(1, int(num_steps / 1.5))
+
+    if not paused:
+        simulate_frame()
+
+    draw()
+    clock.tick(60)
+
+pygame.quit()
+sys.exit()
